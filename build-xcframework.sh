@@ -1,17 +1,26 @@
 #!/usr/bin/env bash
 #
+# Revol custom build-xcframework.sh
+#
+# 改动 (相对官方):
+#   1. LLAMA_BUILD_TOOLS=ON                 -- 编 mtmd
+#   2. LLAMA_BUILD_COMMON=ON                -- mtmd 依赖 common
+#   3. headers 加 mtmd.h / mtmd-helper.h
+#   4. module.modulemap 加 mtmd headers
+#   5. libs 数组加 libcommon.a / libmtmd.a / libmtmd_helper.a
+#   6. 砍掉 visionOS / tvOS (Revol 是 macOS app, 用不到)
+#
+
 # Options
 IOS_MIN_OS_VERSION=16.4
 MACOS_MIN_OS_VERSION=13.3
-VISIONOS_MIN_OS_VERSION=1.0
-TVOS_MIN_OS_VERSION=16.4
 
 BUILD_SHARED_LIBS=OFF
 LLAMA_BUILD_EXAMPLES=OFF
-LLAMA_BUILD_TOOLS=ON       # ⚠️ Revol 改: 官方 OFF, 必须 ON 才能编 tools/mtmd 子目录
+LLAMA_BUILD_TOOLS=ON
 LLAMA_BUILD_TESTS=OFF
 LLAMA_BUILD_SERVER=OFF
-LLAMA_BUILD_COMMON=ON      # ⚠️ Revol 加: mtmd 依赖 common (libcommon.a)
+LLAMA_BUILD_COMMON=ON
 GGML_METAL=ON
 GGML_METAL_EMBED_LIBRARY=ON
 GGML_BLAS_DEFAULT=ON
@@ -21,7 +30,6 @@ GGML_OPENMP=OFF
 COMMON_C_FLAGS="-Wno-macro-redefined -Wno-shorten-64-to-32 -Wno-unused-command-line-argument -g"
 COMMON_CXX_FLAGS="-Wno-macro-redefined -Wno-shorten-64-to-32 -Wno-unused-command-line-argument -g"
 
-# Common options for all builds
 COMMON_CMAKE_ARGS=(
     -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED=NO
     -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY=""
@@ -48,13 +56,13 @@ COMMON_CMAKE_ARGS=(
 check_required_tool() {
     local tool=$1
     local install_message=$2
-
     if ! command -v $tool &> /dev/null; then
         echo "Error: $tool is required but not found."
         echo "$install_message"
         exit 1
     fi
 }
+
 echo "Checking for required tools..."
 check_required_tool "cmake" "Please install CMake 3.28.0 or later (brew install cmake)"
 check_required_tool "xcrun" "Please install Xcode and Xcode Command Line Tools (xcode-select --install)"
@@ -66,55 +74,44 @@ echo "Detected Xcode version: $XCODE_VERSION"
 
 set -e
 
-## Clean up previous builds
+# Clean up previous builds
 rm -rf build-apple
 rm -rf build-ios-sim
 rm -rf build-ios-device
 rm -rf build-macos
-rm -rf build-visionos
-rm -rf build-visionos-sim
-rm -rf build-tvos-sim
-rm -rf build-tvos-device
 
 # Setup the xcframework build directory structure
 setup_framework_structure() {
     local build_dir=$1
     local min_os_version=$2
-    local platform=$3  # "ios", "macos", "visionos", or "tvos"
+    local platform=$3  # "ios" or "macos"
     local framework_name="llama"
 
     echo "Creating ${platform}-style framework structure for ${build_dir}"
 
     if [[ "$platform" == "macos" ]]; then
-        # macOS versioned structure uses versioned directories
         mkdir -p ${build_dir}/framework/${framework_name}.framework/Versions/A/Headers
         mkdir -p ${build_dir}/framework/${framework_name}.framework/Versions/A/Modules
         mkdir -p ${build_dir}/framework/${framework_name}.framework/Versions/A/Resources
 
-        # Create symbolic links
         ln -sf A ${build_dir}/framework/${framework_name}.framework/Versions/Current
         ln -sf Versions/Current/Headers ${build_dir}/framework/${framework_name}.framework/Headers
         ln -sf Versions/Current/Modules ${build_dir}/framework/${framework_name}.framework/Modules
         ln -sf Versions/Current/Resources ${build_dir}/framework/${framework_name}.framework/Resources
         ln -sf Versions/Current/${framework_name} ${build_dir}/framework/${framework_name}.framework/${framework_name}
 
-        # Set header and module paths
         local header_path=${build_dir}/framework/${framework_name}.framework/Versions/A/Headers/
         local module_path=${build_dir}/framework/${framework_name}.framework/Versions/A/Modules/
     else
-        # iOS/VisionOS/tvOS use a flat structure
         mkdir -p ${build_dir}/framework/${framework_name}.framework/Headers
         mkdir -p ${build_dir}/framework/${framework_name}.framework/Modules
-
-        # Remove any existing structure to ensure clean build
         rm -rf ${build_dir}/framework/${framework_name}.framework/Versions
 
-        # Set header and module paths
         local header_path=${build_dir}/framework/${framework_name}.framework/Headers/
         local module_path=${build_dir}/framework/${framework_name}.framework/Modules/
     fi
 
-    # Copy all required headers (common for all platforms)
+    # Headers
     cp include/llama.h             ${header_path}
     cp ggml/include/ggml.h         ${header_path}
     cp ggml/include/ggml-opt.h     ${header_path}
@@ -124,12 +121,11 @@ setup_framework_structure() {
     cp ggml/include/ggml-cpu.h     ${header_path}
     cp ggml/include/ggml-blas.h    ${header_path}
     cp ggml/include/gguf.h         ${header_path}
-    # ⚠️ Revol 加: mtmd headers
+    # mtmd headers
     cp tools/mtmd/mtmd.h           ${header_path}
     cp tools/mtmd/mtmd-helper.h    ${header_path}
 
-    # Create module map (common for all platforms)
-    # ⚠️ Revol 改: 加上 mtmd / mtmd-helper header 声明
+    # Module map
     cat > ${module_path}module.modulemap << EOF
 framework module llama {
     header "llama.h"
@@ -152,7 +148,7 @@ framework module llama {
 }
 EOF
 
-    # Platform-specific settings for Info.plist
+    # Info.plist
     local platform_name=""
     local sdk_name=""
     local supported_platform=""
@@ -176,26 +172,8 @@ EOF
             local plist_path="${build_dir}/framework/${framework_name}.framework/Versions/A/Resources/Info.plist"
             local device_family=""
             ;;
-        "visionos")
-            platform_name="xros"
-            sdk_name="xros${min_os_version}"
-            supported_platform="XRPlatform"
-            local plist_path="${build_dir}/framework/${framework_name}.framework/Info.plist"
-            local device_family=""
-            ;;
-        "tvos")
-            platform_name="appletvos"
-            sdk_name="appletvos${min_os_version}"
-            supported_platform="AppleTVOS"
-            local plist_path="${build_dir}/framework/${framework_name}.framework/Info.plist"
-            local device_family='    <key>UIDeviceFamily</key>
-    <array>
-        <integer>3</integer>
-    </array>'
-            ;;
     esac
 
-    # Create Info.plist
     cat > ${plist_path} << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -232,26 +210,22 @@ EOF
 EOF
 }
 
-# Create dynamic libraries from static libraries.
+# Combine static libraries into a dynamic framework binary
 combine_static_libraries() {
     local build_dir="$1"
     local release_dir="$2"
-    local platform="$3"  # "ios", "macos", "visionos", or "tvos"
+    local platform="$3"  # "ios" or "macos"
     local is_simulator="$4"
     local base_dir="$(pwd)"
     local framework_name="llama"
 
-    # Determine output path based on platform
     local output_lib=""
     if [[ "$platform" == "macos" ]]; then
-        # macOS uses versioned structure
         output_lib="${build_dir}/framework/${framework_name}.framework/Versions/A/${framework_name}"
     else
-        # iOS, visionOS, and tvOS use a directory flat structure
         output_lib="${build_dir}/framework/${framework_name}.framework/${framework_name}"
     fi
 
-    # ⚠️ Revol 改: 加 libcommon.a / libmtmd.a / libmtmd_helper.a
     local libs=(
         "${base_dir}/${build_dir}/src/${release_dir}/libllama.a"
         "${base_dir}/${build_dir}/ggml/src/${release_dir}/libggml.a"
@@ -264,15 +238,11 @@ combine_static_libraries() {
         "${base_dir}/${build_dir}/tools/mtmd/${release_dir}/libmtmd_helper.a"
     )
 
-    # Create temporary directory for processing
     local temp_dir="${base_dir}/${build_dir}/temp"
     mkdir -p "${temp_dir}"
 
-    # Since we have multiple architectures libtool will find object files that do not
-    # match the target architecture. We suppress these warnings.
     xcrun libtool -static -o "${temp_dir}/combined.a" "${libs[@]}" 2> /dev/null
 
-    # Determine SDK, architectures, and install_name based on platform and simulator flag.
     local sdk=""
     local archs=""
     local min_version_flag=""
@@ -297,40 +267,13 @@ combine_static_libraries() {
             min_version_flag="-mmacosx-version-min=${MACOS_MIN_OS_VERSION}"
             install_name="@rpath/llama.framework/Versions/Current/llama"
             ;;
-        "visionos")
-            if [[ "$is_simulator" == "true" ]]; then
-                sdk="xrsimulator"
-                archs="arm64 x86_64"
-                min_version_flag="-mtargetos=xros${VISIONOS_MIN_OS_VERSION}-simulator"
-            else
-                sdk="xros"
-                archs="arm64"
-                min_version_flag="-mtargetos=xros${VISIONOS_MIN_OS_VERSION}"
-            fi
-            # Use flat structure for visionOS, same as iOS
-            install_name="@rpath/llama.framework/llama"
-            ;;
-        "tvos")
-            if [[ "$is_simulator" == "true" ]]; then
-                sdk="appletvsimulator"
-                archs="arm64 x86_64"
-                min_version_flag="-mtvos-simulator-version-min=${TVOS_MIN_OS_VERSION}"
-            else
-                sdk="appletvos"
-                archs="arm64"
-                min_version_flag="-mtvos-version-min=${TVOS_MIN_OS_VERSION}"
-            fi
-            install_name="@rpath/llama.framework/llama"
-            ;;
     esac
 
-    # Build architecture flags
     local arch_flags=""
     for arch in $archs; do
         arch_flags+=" -arch $arch"
     done
 
-    # Create dynamic library
     echo "Creating dynamic library for ${platform}."
     xcrun -sdk $sdk clang++ -dynamiclib \
         -isysroot $(xcrun --sdk $sdk --show-sdk-path) \
@@ -341,75 +284,34 @@ combine_static_libraries() {
         -install_name "$install_name" \
         -o "${base_dir}/${output_lib}"
 
-    # Platform-specific post-processing for device builds
-    if [[ "$is_simulator" == "false" ]]; then
+    if [[ "$is_simulator" == "false" && "$platform" == "ios" ]]; then
         if xcrun -f vtool &>/dev/null; then
-            case "$platform" in
-                "ios")
-                    echo "Marking binary as a framework binary for iOS..."
-                    xcrun vtool -set-build-version ios ${IOS_MIN_OS_VERSION} ${IOS_MIN_OS_VERSION} -replace \
-                        -output "${base_dir}/${output_lib}" "${base_dir}/${output_lib}"
-                    ;;
-                "visionos")
-                    echo "Marking binary as a framework binary for visionOS..."
-                    if [[ "$MAJOR_VERSION" -gt 16 ]] || [[ "$MAJOR_VERSION" -eq 16 && "$MINOR_VERSION" -gt 2 ]]; then
-                        echo "Xcode version greater than 16.2, using visionOS."
-                        VISION_OS_BUILD_VERSION="visionos"
-                    else
-                        echo "Xcode version less than or equal to 16.2, using xros."
-                        VISION_OS_BUILD_VERSION="xros"
-                    fi
-                    xcrun vtool -set-build-version ${VISION_OS_BUILD_VERSION} ${VISIONOS_MIN_OS_VERSION} ${VISIONOS_MIN_OS_VERSION} -replace \
-                        -output "${base_dir}/${output_lib}" "${base_dir}/${output_lib}"
-                    ;;
-                "tvos")
-                    echo "Marking binary as a framework binary for tvOS..."
-                    xcrun vtool -set-build-version tvos ${TVOS_MIN_OS_VERSION} ${TVOS_MIN_OS_VERSION} -replace \
-                        -output "${base_dir}/${output_lib}" "${base_dir}/${output_lib}"
-                    ;;
-            esac
+            echo "Marking binary as a framework binary for iOS..."
+            xcrun vtool -set-build-version ios ${IOS_MIN_OS_VERSION} ${IOS_MIN_OS_VERSION} -replace \
+                -output "${base_dir}/${output_lib}" "${base_dir}/${output_lib}"
         else
-            echo "Warning: vtool not found. Binary may not pass App Store validation."
+            echo "Warning: vtool not found."
         fi
     fi
 
     echo "Creating properly formatted dSYM..."
-    # Create a separate directory for dSYMs for all platforms
     mkdir -p "${base_dir}/${build_dir}/dSYMs"
 
-    # iOS and visionOS style dSYM (flat structure)
-    if [[ "$platform" == "ios" || "$platform" == "visionos" || "$platform" == "tvos" ]]; then
-        # Generate dSYM in the dSYMs directory
+    if [[ "$platform" == "ios" ]]; then
         xcrun dsymutil "${base_dir}/${output_lib}" -o "${base_dir}/${build_dir}/dSYMs/llama.dSYM"
-
-        # Create a copy of the binary that will be stripped
         cp "${base_dir}/${output_lib}" "${temp_dir}/binary_to_strip"
-
-        # Strip debug symbols from the copy
         xcrun strip -S "${temp_dir}/binary_to_strip" -o "${temp_dir}/stripped_lib"
-
-        # Replace the original with the stripped version
         mv "${temp_dir}/stripped_lib" "${base_dir}/${output_lib}"
     else
-        # macOS style dSYM
-        # First strip debug info to a separate file
         xcrun strip -S "${base_dir}/${output_lib}" -o "${temp_dir}/stripped_lib"
-
-        # Generate dSYM in the dSYMs directory
         xcrun dsymutil "${base_dir}/${output_lib}" -o "${base_dir}/${build_dir}/dSYMs/llama.dSYM"
-
-        # Replace original binary with stripped version
         mv "${temp_dir}/stripped_lib" "${base_dir}/${output_lib}"
     fi
 
-    # Remove any automatically generated dSYM files in the framework structure as they will
-    # otherwise case Invalid Bundle Structure validation errors.
     if [ -d "${base_dir}/${output_lib}.dSYM" ]; then
-        echo "Removing generated dSYM file in framework structure: ${base_dir}/${output_lib}.dSYM"
         rm -rf "${base_dir}/${output_lib}.dSYM"
     fi
 
-    # Clean up
     rm -rf "${temp_dir}"
 }
 
@@ -453,89 +355,18 @@ cmake -B build-macos -G Xcode \
     -S .
 cmake --build build-macos --config Release -- -quiet
 
-echo "Building for visionOS..."
-cmake -B build-visionos -G Xcode \
-    "${COMMON_CMAKE_ARGS[@]}" \
-    -DCMAKE_OSX_DEPLOYMENT_TARGET=${VISIONOS_MIN_OS_VERSION} \
-    -DCMAKE_OSX_ARCHITECTURES="arm64" \
-    -DCMAKE_SYSTEM_NAME=visionOS \
-    -DCMAKE_OSX_SYSROOT=xros \
-    -DCMAKE_XCODE_ATTRIBUTE_SUPPORTED_PLATFORMS=xros \
-    -DCMAKE_C_FLAGS="${COMMON_C_FLAGS}" \
-    -DCMAKE_CXX_FLAGS="${COMMON_CXX_FLAGS}" \
-    -DLLAMA_OPENSSL=OFF \
-    -DLLAMA_BUILD_SERVER=OFF \
-    -S .
-cmake --build build-visionos --config Release -- -quiet
-
-echo "Building for visionOS simulator..."
-cmake -B build-visionos-sim -G Xcode \
-    "${COMMON_CMAKE_ARGS[@]}" \
-    -DCMAKE_OSX_DEPLOYMENT_TARGET=${VISIONOS_MIN_OS_VERSION} \
-    -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
-    -DCMAKE_SYSTEM_NAME=visionOS \
-    -DCMAKE_OSX_SYSROOT=xrsimulator \
-    -DCMAKE_XCODE_ATTRIBUTE_SUPPORTED_PLATFORMS=xrsimulator \
-    -DCMAKE_C_FLAGS="${COMMON_C_FLAGS}" \
-    -DCMAKE_CXX_FLAGS="${COMMON_CXX_FLAGS}" \
-    -DLLAMA_OPENSSL=OFF \
-    -DLLAMA_BUILD_SERVER=OFF \
-    -S .
-cmake --build build-visionos-sim --config Release -- -quiet
-
-# Add tvOS builds (might need the same u_int definitions as watchOS and visionOS)
-echo "Building for tvOS simulator..."
-cmake -B build-tvos-sim -G Xcode \
-    "${COMMON_CMAKE_ARGS[@]}" \
-    -DCMAKE_OSX_DEPLOYMENT_TARGET=${TVOS_MIN_OS_VERSION} \
-    -DCMAKE_SYSTEM_NAME=tvOS \
-    -DCMAKE_OSX_SYSROOT=appletvsimulator \
-    -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
-    -DGGML_METAL=ON \
-    -DCMAKE_XCODE_ATTRIBUTE_SUPPORTED_PLATFORMS=appletvsimulator \
-    -DCMAKE_C_FLAGS="${COMMON_C_FLAGS}" \
-    -DCMAKE_CXX_FLAGS="${COMMON_CXX_FLAGS}" \
-    -DLLAMA_OPENSSL=OFF \
-    -S .
-cmake --build build-tvos-sim --config Release -- -quiet
-
-echo "Building for tvOS devices..."
-cmake -B build-tvos-device -G Xcode \
-    "${COMMON_CMAKE_ARGS[@]}" \
-    -DCMAKE_OSX_DEPLOYMENT_TARGET=${TVOS_MIN_OS_VERSION} \
-    -DCMAKE_SYSTEM_NAME=tvOS \
-    -DCMAKE_OSX_SYSROOT=appletvos \
-    -DCMAKE_OSX_ARCHITECTURES="arm64" \
-    -DGGML_METAL=ON \
-    -DCMAKE_XCODE_ATTRIBUTE_SUPPORTED_PLATFORMS=appletvos \
-    -DCMAKE_C_FLAGS="${COMMON_C_FLAGS}" \
-    -DCMAKE_CXX_FLAGS="${COMMON_CXX_FLAGS}" \
-    -DLLAMA_OPENSSL=OFF \
-    -S .
-cmake --build build-tvos-device --config Release -- -quiet
-
-# Setup frameworks and copy binaries and headers
 echo "Setting up framework structures..."
 setup_framework_structure "build-ios-sim" ${IOS_MIN_OS_VERSION} "ios"
 setup_framework_structure "build-ios-device" ${IOS_MIN_OS_VERSION} "ios"
 setup_framework_structure "build-macos" ${MACOS_MIN_OS_VERSION} "macos"
-setup_framework_structure "build-visionos" ${VISIONOS_MIN_OS_VERSION} "visionos"
-setup_framework_structure "build-visionos-sim" ${VISIONOS_MIN_OS_VERSION} "visionos"
-setup_framework_structure "build-tvos-sim" ${TVOS_MIN_OS_VERSION} "tvos"
-setup_framework_structure "build-tvos-device" ${TVOS_MIN_OS_VERSION} "tvos"
 
-# Create dynamic libraries from static libraries
 echo "Creating dynamic libraries from static libraries..."
 combine_static_libraries "build-ios-sim" "Release-iphonesimulator" "ios" "true"
 combine_static_libraries "build-ios-device" "Release-iphoneos" "ios" "false"
 combine_static_libraries "build-macos" "Release" "macos" "false"
-combine_static_libraries "build-visionos" "Release-xros" "visionos" "false"
-combine_static_libraries "build-visionos-sim" "Release-xrsimulator" "visionos" "true"
-combine_static_libraries "build-tvos-sim" "Release-appletvsimulator" "tvos" "true"
-combine_static_libraries "build-tvos-device" "Release-appletvos" "tvos" "false"
 
-# Create XCFramework with correct debug symbols paths
 echo "Creating XCFramework..."
+mkdir -p build-apple
 xcrun xcodebuild -create-xcframework \
     -framework $(pwd)/build-ios-sim/framework/llama.framework \
     -debug-symbols $(pwd)/build-ios-sim/dSYMs/llama.dSYM \
@@ -543,12 +374,9 @@ xcrun xcodebuild -create-xcframework \
     -debug-symbols $(pwd)/build-ios-device/dSYMs/llama.dSYM \
     -framework $(pwd)/build-macos/framework/llama.framework \
     -debug-symbols $(pwd)/build-macos/dSYMs/llama.dSYM \
-    -framework $(pwd)/build-visionos/framework/llama.framework \
-    -debug-symbols $(pwd)/build-visionos/dSYMs/llama.dSYM \
-    -framework $(pwd)/build-visionos-sim/framework/llama.framework \
-    -debug-symbols $(pwd)/build-visionos-sim/dSYMs/llama.dSYM \
-    -framework $(pwd)/build-tvos-device/framework/llama.framework \
-    -debug-symbols $(pwd)/build-tvos-device/dSYMs/llama.dSYM \
-    -framework $(pwd)/build-tvos-sim/framework/llama.framework \
-    -debug-symbols $(pwd)/build-tvos-sim/dSYMs/llama.dSYM \
     -output $(pwd)/build-apple/llama.xcframework
+
+echo ""
+echo "✅ Done. XCFramework: build-apple/llama.xcframework"
+echo "   Slices: ios-sim (arm64+x86_64), ios-device (arm64), macos (arm64+x86_64)"
+echo "   包含 mtmd: 是 (libmtmd.a + libmtmd_helper.a + libcommon.a)"
