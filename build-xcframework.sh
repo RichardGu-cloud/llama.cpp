@@ -123,9 +123,19 @@ setup_framework_structure() {
     cp ggml/include/gguf.h         ${header_path}
     # mtmd headers
     cp tools/mtmd/mtmd.h           ${header_path}
-    cp tools/mtmd/mtmd-helper.h    ${header_path}
+    if [ -f tools/mtmd/mtmd-helper.h ]; then
+        cp tools/mtmd/mtmd-helper.h    ${header_path}
+        local has_mtmd_helper_header=1
+    else
+        echo "  (mtmd-helper.h 在这个版本不存在, 跳过)"
+        local has_mtmd_helper_header=0
+    fi
 
-    # Module map
+    # Module map (条件性加 mtmd-helper.h)
+    local mtmd_helper_header_line=""
+    if [ "$has_mtmd_helper_header" = "1" ]; then
+        mtmd_helper_header_line='    header "mtmd-helper.h"'
+    fi
     cat > ${module_path}module.modulemap << EOF
 framework module llama {
     header "llama.h"
@@ -137,7 +147,7 @@ framework module llama {
     header "ggml-blas.h"
     header "gguf.h"
     header "mtmd.h"
-    header "mtmd-helper.h"
+${mtmd_helper_header_line}
 
     link "c++"
     link framework "Accelerate"
@@ -233,9 +243,8 @@ combine_static_libraries() {
         "${base_dir}/${build_dir}/ggml/src/${release_dir}/libggml-cpu.a"
         "${base_dir}/${build_dir}/ggml/src/ggml-metal/${release_dir}/libggml-metal.a"
         "${base_dir}/${build_dir}/ggml/src/ggml-blas/${release_dir}/libggml-blas.a"
-        "${base_dir}/${build_dir}/common/${release_dir}/libcommon.a"
+        "${base_dir}/${build_dir}/common/${release_dir}/libllama-common.a"
         "${base_dir}/${build_dir}/tools/mtmd/${release_dir}/libmtmd.a"
-        "${base_dir}/${build_dir}/tools/mtmd/${release_dir}/libmtmd_helper.a"
     )
 
     # ⚠️ Debug: 检查每个 .a 是否存在, 不存在的话搜一下实际位置
