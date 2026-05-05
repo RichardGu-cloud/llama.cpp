@@ -1,0 +1,109 @@
+name: Build mtmd XCFramework
+
+# 在 GitHub 网页上手动触发 (Actions tab → 这个 workflow → Run workflow 按钮)
+# 输入要编的 llama.cpp tag (例如 b8984), 自动 build, 完成后从 Artifacts 下载 zip
+
+on:
+  workflow_dispatch:
+    inputs:
+      llama_tag:
+        description: 'llama.cpp tag (例如 b8984)'
+        required: true
+        default: 'b8984'
+
+jobs:
+  build:
+    name: Build XCFramework on macOS
+    runs-on: macos-15
+    timeout-minutes: 120
+
+    steps:
+      # 1. Checkout 用户的 fork (我们要拿里面的自定义 build-xcframework.sh)
+      - name: Checkout fork (with custom build script)
+        uses: actions/checkout@v4
+        with:
+          path: fork
+
+      # 2. Checkout 指定 tag 的 llama.cpp 源码到独立目录
+      - name: Checkout llama.cpp source at tag
+        uses: actions/checkout@v4
+        with:
+          repository: ggml-org/llama.cpp
+          ref: ${{ github.event.inputs.llama_tag }}
+          path: llama.cpp
+
+      # 3. 把 fork 里的自定义 build-xcframework.sh 覆盖到 llama.cpp 源码里
+      - name: Overlay custom build script
+        run: |
+          cp fork/build-xcframework.sh llama.cpp/build-xcframework.sh
+          chmod +x llama.cpp/build-xcframework.sh
+          echo "--- 用的脚本是 fork 里的版本 ---"
+          head -20 llama.cpp/build-xcframework.sh
+
+      # 4. 显示环境信息 (debug 用)
+      - name: Show environment
+        working-directory: llama.cpp
+        run: |
+          xcodebuild -version
+          cmake --version
+          echo "---"
+          git log -1 --format='%h %s'
+
+      # 5. 跑 build (40-90 分钟)
+      - name: Run build-xcframework.sh
+        working-directory: llama.cpp
+        run: ./build-xcframework.sh
+
+      # 6. 验证 mtmd 符号确实编进去了
+      - name: Verify mtmd symbols in macOS slice
+        working-directory: llama.cpp
+        run: |
+          set -e
+          BIN="build-apple/llama.xcframework/macos-arm64_x86_64/llama.framework/Versions/A/llama"
+          if [ ! -f "$BIN" ]; then
+            echo "❌ macOS framework binary 不存在: $BIN"
+            ls -la build-apple/llama.xcframework/ || true
+            exit 1
+          fi
+          echo "Symbols matching mtmd_*:"
+          nm -gU "$BIN" | grep -E 'mtmd_' | head -20
+          echo "---"
+          if nm -gU "$BIN" | grep -q 'mtmd_init_from_file'; then
+            echo "✅ mtmd_init_from_file 符号存在"
+          else
+            echo "❌ mtmd_init_from_file 符号不存在! libmtmd 没编进去"
+            exit 1
+          fi
+          if nm -gU "$BIN" | grep -q 'mtmd_bitmap_init_from_audio'; then
+            echo "✅ mtmd_bitmap_init_from_audio 符号存在"
+          else
+            echo "❌ mtmd_bitmap_init_from_audio 不存在 (audio 不可用)"
+            exit 1
+          fi
+
+      # 7. 验证 mtmd headers
+      - name: Verify mtmd headers
+        working-directory: llama.cpp
+        run: |
+          HEADERS="build-apple/llama.xcframework/macos-arm64_x86_64/llama.framework/Versions/A/Headers"
+          ls -la "$HEADERS"
+          test -f "$HEADERS/mtmd.h" && echo "✅ mtmd.h 存在" || (echo "❌ 缺 mtmd.h" && exit 1)
+          test -f "$HEADERS/mtmd-helper.h" && echo "✅ mtmd-helper.h 存在" || (echo "❌ 缺 mtmd-helper.h" && exit 1)
+
+      # 8. 打包成 zip
+      - name: Zip XCFramework
+        working-directory: llama.cpp
+        run: |
+          cd build-apple
+          zip -r ../../llama-${{ github.event.inputs.llama_tag }}-mtmd-xcframework.zip llama.xcframework
+          cd ../..
+          ls -lh llama-*.zip
+          shasum -a 256 llama-*.zip
+
+      # 9. 上传到 Actions artifacts (在 run 页面底部下载)
+      - name: Upload XCFramework artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: llama-${{ github.event.inputs.llama_tag }}-mtmd-xcframework
+          path: llama-${{ github.event.inputs.llama_tag }}-mtmd-xcframework.zip
+          retention-days: 14
