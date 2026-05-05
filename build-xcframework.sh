@@ -8,9 +8,10 @@ TVOS_MIN_OS_VERSION=16.4
 
 BUILD_SHARED_LIBS=OFF
 LLAMA_BUILD_EXAMPLES=OFF
-LLAMA_BUILD_TOOLS=OFF
+LLAMA_BUILD_TOOLS=ON       # ⚠️ Revol 改: 官方 OFF, 必须 ON 才能编 tools/mtmd 子目录
 LLAMA_BUILD_TESTS=OFF
 LLAMA_BUILD_SERVER=OFF
+LLAMA_BUILD_COMMON=ON      # ⚠️ Revol 加: mtmd 依赖 common (libcommon.a)
 GGML_METAL=ON
 GGML_METAL_EMBED_LIBRARY=ON
 GGML_BLAS_DEFAULT=ON
@@ -35,6 +36,7 @@ COMMON_CMAKE_ARGS=(
     -DLLAMA_BUILD_TOOLS=${LLAMA_BUILD_TOOLS}
     -DLLAMA_BUILD_TESTS=${LLAMA_BUILD_TESTS}
     -DLLAMA_BUILD_SERVER=${LLAMA_BUILD_SERVER}
+    -DLLAMA_BUILD_COMMON=${LLAMA_BUILD_COMMON}
     -DGGML_METAL_EMBED_LIBRARY=${GGML_METAL_EMBED_LIBRARY}
     -DGGML_BLAS_DEFAULT=${GGML_BLAS_DEFAULT}
     -DGGML_METAL=${GGML_METAL}
@@ -122,8 +124,12 @@ setup_framework_structure() {
     cp ggml/include/ggml-cpu.h     ${header_path}
     cp ggml/include/ggml-blas.h    ${header_path}
     cp ggml/include/gguf.h         ${header_path}
+    # ⚠️ Revol 加: mtmd headers
+    cp tools/mtmd/mtmd.h           ${header_path}
+    cp tools/mtmd/mtmd-helper.h    ${header_path}
 
     # Create module map (common for all platforms)
+    # ⚠️ Revol 改: 加上 mtmd / mtmd-helper header 声明
     cat > ${module_path}module.modulemap << EOF
 framework module llama {
     header "llama.h"
@@ -134,6 +140,8 @@ framework module llama {
     header "ggml-cpu.h"
     header "ggml-blas.h"
     header "gguf.h"
+    header "mtmd.h"
+    header "mtmd-helper.h"
 
     link "c++"
     link framework "Accelerate"
@@ -243,6 +251,7 @@ combine_static_libraries() {
         output_lib="${build_dir}/framework/${framework_name}.framework/${framework_name}"
     fi
 
+    # ⚠️ Revol 改: 加 libcommon.a / libmtmd.a / libmtmd_helper.a
     local libs=(
         "${base_dir}/${build_dir}/src/${release_dir}/libllama.a"
         "${base_dir}/${build_dir}/ggml/src/${release_dir}/libggml.a"
@@ -250,6 +259,9 @@ combine_static_libraries() {
         "${base_dir}/${build_dir}/ggml/src/${release_dir}/libggml-cpu.a"
         "${base_dir}/${build_dir}/ggml/src/ggml-metal/${release_dir}/libggml-metal.a"
         "${base_dir}/${build_dir}/ggml/src/ggml-blas/${release_dir}/libggml-blas.a"
+        "${base_dir}/${build_dir}/common/${release_dir}/libcommon.a"
+        "${base_dir}/${build_dir}/tools/mtmd/${release_dir}/libmtmd.a"
+        "${base_dir}/${build_dir}/tools/mtmd/${release_dir}/libmtmd_helper.a"
     )
 
     # Create temporary directory for processing
