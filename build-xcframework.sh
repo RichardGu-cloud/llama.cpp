@@ -238,10 +238,33 @@ combine_static_libraries() {
         "${base_dir}/${build_dir}/tools/mtmd/${release_dir}/libmtmd_helper.a"
     )
 
+    # ⚠️ Debug: 检查每个 .a 是否存在, 不存在的话搜一下实际位置
+    echo "===== checking expected libs for ${platform} (${release_dir}) ====="
+    local missing=0
+    for lib in "${libs[@]}"; do
+        if [ -f "$lib" ]; then
+            echo "  ✅ $(basename $lib)  ($lib)"
+        else
+            echo "  ❌ MISSING: $lib"
+            missing=$((missing + 1))
+        fi
+    done
+
+    if [ $missing -gt 0 ]; then
+        echo ""
+        echo "===== searching for any *.a in ${build_dir} ====="
+        find "${base_dir}/${build_dir}" -name "*.a" 2>/dev/null | head -50
+        echo ""
+        echo "❌ $missing 个 lib 文件缺失, 退出. 用上面 find 的输出修正路径."
+        exit 1
+    fi
+
     local temp_dir="${base_dir}/${build_dir}/temp"
     mkdir -p "${temp_dir}"
 
-    xcrun libtool -static -o "${temp_dir}/combined.a" "${libs[@]}" 2> /dev/null
+    # 把 stderr 也输出, 不要 2>/dev/null 吞掉
+    echo "===== running libtool ====="
+    xcrun libtool -static -o "${temp_dir}/combined.a" "${libs[@]}"
 
     local sdk=""
     local archs=""
